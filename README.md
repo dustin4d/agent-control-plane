@@ -32,6 +32,9 @@ npm run dev
 5. **Policy egress**: code checks the actions against allowed tools, allowed paths and the step
    budget; Jev picks the verdict. Allow/rewrite loops to the next worker; ask/deny blocks.
 
+Layout: Control Plane, Head Agent and Queue on the left; Policy gate and Inspector in the center;
+the Workload Stack (stacked vertically) and `ACTIONS.JSON` on the right.
+
 Click any node (or press `1`–`6`) to inspect it: Overview, JSON, Workflow (bounds editor) and Jev
 (questions, answers, confidence bars, reason).
 

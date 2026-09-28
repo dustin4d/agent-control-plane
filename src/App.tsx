@@ -50,10 +50,12 @@ export default function App() {
         </div>
         <div className="flex flex-col gap-2 min-[1100px]:min-h-0 min-[1100px]:overflow-auto">
           <PolicyGate />
-          <WorkloadStack />
+          <Inspector className="min-h-[360px] min-[1100px]:flex-1" />
+        </div>
+        <div className="flex flex-col gap-2 min-[1100px]:min-h-0 min-[1100px]:overflow-auto">
+          <WorkloadStack vertical />
           <ActionsJsonPanel className="min-[1100px]:flex-1" />
         </div>
-        <Inspector className="min-h-[360px] min-[1100px]:min-h-0" />
       </main>
       <EventTicker />
     </div>
