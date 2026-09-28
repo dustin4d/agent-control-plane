@@ -1,9 +1,9 @@
-import { initialAgents } from "../data/catalogs";
-import type { ScenarioId, SimState, WorkerId, WorkflowEdit } from "../types";
+import { DEFAULT_WORKFLOW, initialAgents } from "../data/catalogs";
+import type { ScenarioId, SimState } from "../types";
 import { OPERATOR_KILL } from "./fixtures";
 import { nextId } from "./ids";
 import { askJev } from "./jev";
-import { block, log } from "./ops";
+import { block } from "./ops";
 import { SCENARIOS } from "./scenarios";
 
 /**
@@ -11,51 +11,29 @@ import { SCENARIOS } from "./scenarios";
  * the previous one. Only the store's single interval calls tick().
  */
 
-export function initialState(
-  scenarioId: ScenarioId,
-  workflow: Record<WorkerId, WorkflowEdit>,
-  inputHistory: SimState["inputHistory"] = [],
-): SimState {
+export function initialState(scenarioId: ScenarioId): SimState {
   return {
     scenarioId,
     tick: 0,
     cursor: 0,
     status: "idle",
-    inputHistory,
-    plan: [],
-    agents: initialAgents(workflow),
+    agents: initialAgents(DEFAULT_WORKFLOW),
     decisions: [],
     taskJson: {},
     actions: {},
-    reviewed: [],
     queue: [],
-    events: [],
+    questions: [],
   };
 }
 
-export function reset(s: SimState, workflow: Record<WorkerId, WorkflowEdit>): SimState {
-  return initialState(s.scenarioId, workflow, s.inputHistory);
-}
-
-export function submit(s: SimState, rawText: string, status: "running" | "paused" = "running"): SimState {
+export function submit(s: SimState, rawText: string): SimState {
   const text = rawText.trim();
   if (!text || s.status !== "idle") return s;
-  const input = { id: nextId("task"), rawText: text, createdAt: s.tick };
   const next = structuredClone(s);
-  next.submitted = input;
-  next.inputHistory = [...s.inputHistory, input];
-  next.status = status;
+  next.submitted = { id: nextId("task"), rawText: text, createdAt: s.tick };
+  next.status = "running";
   next.agents["control-plane"].status = "working";
-  next.agents["control-plane"].snippet = "task submitted";
-  log(next, "control-plane", "ui", `Send to Head Agent: ${input.id}`);
   return next;
-}
-
-function applyNext(draft: SimState): void {
-  const step = SCENARIOS[draft.scenarioId].script[draft.cursor];
-  if (!step) return;
-  draft.cursor += 1;
-  step.apply(draft);
 }
 
 export function tick(s: SimState): SimState {
@@ -64,53 +42,39 @@ export function tick(s: SimState): SimState {
   draft.tick += 1;
   const script = SCENARIOS[draft.scenarioId].script;
   while (draft.status === "running" && script[draft.cursor] && script[draft.cursor].atTick <= draft.tick) {
-    applyNext(draft);
+    const step = script[draft.cursor];
+    draft.cursor += 1;
+    step.apply(draft);
   }
   return draft;
 }
 
-/** Run exactly one scheduled event, then hold in paused. */
-export function step(s: SimState): SimState {
-  if (s.status !== "running" && s.status !== "paused") return s;
-  const next = SCENARIOS[s.scenarioId].script[s.cursor];
-  if (!next) return s;
+/** Record the user's choice for a waiting worker and resume the run. */
+export function answer(s: SimState, questionId: string, optionId: string): SimState {
+  if (s.status !== "waiting-user") return s;
+  const q = s.questions.find((x) => x.id === questionId);
+  if (!q || q.answer || !q.options.some((o) => o.id === optionId)) return s;
   const draft = structuredClone(s);
-  draft.tick = Math.max(draft.tick + 1, next.atTick);
-  applyNext(draft);
-  if (draft.status === "running") draft.status = "paused";
+  const dq = draft.questions.find((x) => x.id === questionId);
+  if (!dq) return s;
+  dq.answer = optionId;
+  draft.agents[dq.agentId].status = "working";
+  for (const item of draft.queue) if (item.agentId === dq.agentId) item.status = "working";
+  draft.agents[dq.agentId].snippet = `Continuing: ${dq.options.find((o) => o.id === optionId)?.label ?? optionId}`;
+  draft.status = "running";
   return draft;
 }
 
-export function setPaused(s: SimState, paused: boolean): SimState {
-  if (paused && s.status === "running") return { ...s, status: "paused" };
-  if (!paused && s.status === "paused") return { ...s, status: "running" };
-  return s;
-}
-
-export function kill(s: SimState): SimState {
-  if (s.status !== "running" && s.status !== "paused") return s;
+export function stop(s: SimState): SimState {
+  if (s.status !== "running" && s.status !== "waiting-user") return s;
   const draft = structuredClone(s);
   const active = draft.activeWorker;
   const jev = askJev(OPERATOR_KILL);
   if (active) {
     draft.agents[active].status = "error";
     for (const q of draft.queue) if (q.agentId === active) q.status = "error";
-    const doc = draft.actions[active];
-    if (doc) draft.reviewed.push(active);
-    draft.decisions.push({
-      id: nextId("pd"),
-      t: draft.tick,
-      phase: "egress",
-      subject: active,
-      ...jev,
-      taskIn: JSON.stringify(draft.taskJson[active] ?? {}, null, 2),
-      actionsIn: doc ? structuredClone(doc) : undefined,
-    });
-  } else {
-    draft.decisions.push({ id: nextId("pd"), t: draft.tick, phase: "egress", subject: "policy-agent", ...jev });
   }
-  draft.agents["policy-agent"].snippet = "egress deny\noperator kill";
-  log(draft, "policy-agent", "policy", `deny  operator kill${active ? ` (${active})` : ""}`);
+  draft.decisions.push({ id: nextId("pd"), t: draft.tick, phase: "egress", subject: active ?? "policy-agent", ...jev });
   block(draft);
   return draft;
 }

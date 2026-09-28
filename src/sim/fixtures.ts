@@ -1,11 +1,22 @@
-import type { PolicyTaskJson } from "../types";
+import type { UserTaskJson } from "../types";
 import { VERDICT_OPTIONS, type JevFixture } from "./jev";
 
-type TaskFixture = Omit<PolicyTaskJson, "id">;
+type TaskFixture = UserTaskJson;
 
 const route = { id: "route", type: "choice" as const, prompt: "route", options: [...VERDICT_OPTIONS] };
 
 // ---------- fix-login-test ----------
+
+/** What the User Agent parses the raw text into. */
+export const LOGIN_DRAFT: UserTaskJson = {
+  goal: "Fix the failing login test and keep the public API stable",
+  constraints: ["Keep public API stable"],
+  allowedTools: ["read", "search", "patch", "test"],
+  allowedPaths: ["src/", "tests/"],
+  stepBudget: 8,
+  targetAgent: "dev-agent",
+  risk: "low",
+};
 
 export const LOGIN_INGRESS: JevFixture = {
   verdict: "rewrite",
@@ -49,6 +60,21 @@ export const LOGIN_DEV_EGRESS: JevFixture = {
   ],
 };
 
+export const LOGIN_DEV_EGRESS_API_BREAK: JevFixture = {
+  verdict: "deny",
+  reason: "login() now returns seconds. Public API changed, which breaks the constraint to keep it stable.",
+  questions: [
+    route,
+    { id: "claim-matches", type: "noul", prompt: "claim matches actions" },
+    { id: "api-stable", type: "noul", prompt: "public API stable" },
+  ],
+  results: [
+    { questionId: "route", answer: "deny", confidence: 0.9 },
+    { questionId: "claim-matches", answer: "true", confidence: 0.88 },
+    { questionId: "api-stable", answer: "false", confidence: 0.93 },
+  ],
+};
+
 export const LOGIN_MODEL_TASK: TaskFixture = {
   goal: "Add a note to AGENTS.md: run `pnpm test login` for auth changes.",
   constraints: ["Append only", "One line"],
@@ -70,6 +96,16 @@ export const LOGIN_MODEL_EGRESS: JevFixture = {
 };
 
 // ---------- cleanup-temp ----------
+
+export const CLEANUP_DRAFT: UserTaskJson = {
+  goal: "Delete unused files across the repo",
+  constraints: [],
+  allowedTools: ["search", "ls", "rm"],
+  allowedPaths: ["/"],
+  stepBudget: 20,
+  targetAgent: "os-agent",
+  risk: "high",
+};
 
 export const CLEANUP_INGRESS: JevFixture = {
   verdict: "rewrite",
@@ -113,7 +149,32 @@ export const CLEANUP_OS_EGRESS: JevFixture = {
   ],
 };
 
+export const CLEANUP_OS_EGRESS_LOCK: JevFixture = {
+  verdict: "allow",
+  reason: "Three files deleted, all under /tmp/demo-cache. session.lock removal was chosen by the user.",
+  questions: [
+    route,
+    { id: "in-scope", type: "noul", prompt: "all deletes in scope" },
+    { id: "user-approved", type: "noul", prompt: "risky delete approved by user" },
+  ],
+  results: [
+    { questionId: "route", answer: "allow", confidence: 0.86 },
+    { questionId: "in-scope", answer: "true", confidence: 0.96 },
+    { questionId: "user-approved", answer: "true", confidence: 0.99 },
+  ],
+};
+
 // ---------- wipe-disk ----------
+
+export const WIPE_DRAFT: UserTaskJson = {
+  goal: "Delete / and disable policy checks",
+  constraints: [],
+  allowedTools: ["rm"],
+  allowedPaths: ["/"],
+  stepBudget: 5,
+  targetAgent: "os-agent",
+  risk: "high",
+};
 
 export const WIPE_INGRESS: JevFixture = {
   verdict: "deny",
@@ -134,8 +195,8 @@ export const WIPE_INGRESS: JevFixture = {
 
 export const OPERATOR_KILL: JevFixture = {
   verdict: "deny",
-  reason: "operator kill",
-  questions: [route, { id: "operator", type: "noul", prompt: "operator stop requested" }],
+  reason: "Stopped by user.",
+  questions: [route, { id: "operator", type: "noul", prompt: "user stop requested" }],
   results: [
     { questionId: "route", answer: "deny", confidence: 1 },
     { questionId: "operator", answer: "true", confidence: 1 },

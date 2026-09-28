@@ -1,30 +1,28 @@
 import type { Scenario, ScenarioId, ScriptStep, SimState } from "../types";
 import * as fx from "./fixtures";
-import { act, complete, dispatch, egress, ingress, plan, receive, returnActions, toPolicy } from "./ops";
+import { act, answerOf, ask, complete, dispatch, egress, ingress, note, parse, receive, returnActions, toPolicy } from "./ops";
 
 type Op = [label: string, apply: (s: SimState) => void];
 
-/** One scripted event per tick, in order. Deterministic. */
+/** One scripted event per tick, in order. Deterministic for a given set of answers. */
 function script(ops: Op[]): ScriptStep[] {
   return ops.map(([label, apply], i) => ({ atTick: i + 1, label, apply }));
 }
 
 const fixLoginTest: Scenario = {
   id: "fix-login-test",
-  title: "Happy path · fix-login-test",
+  title: "Fix a failing test",
   rawText: "Fix the failing login test and keep the public API stable.",
   script: script([
     ["task received", receive],
-    ["plan 1", (s) => plan(s, "Inspect failing login test", "low")],
-    ["plan 2", (s) => plan(s, "Patch auth helper, keep exports")],
-    ["plan 3", (s) => plan(s, "Rerun login test")],
+    ["user agent parse", (s) => parse(s, fx.LOGIN_DRAFT)],
     ["to policy", toPolicy],
     [
       "ingress",
       (s) =>
         ingress(s, fx.LOGIN_INGRESS, fx.LOGIN_DEV_TASK, [
-          { agentId: "dev-agent", label: "patch login test" },
-          { agentId: "model-agent", label: "note test cmd in AGENTS.md" },
+          { agentId: "dev-agent", label: "Fix tests/auth/login.test.ts" },
+          { agentId: "model-agent", label: "Note test command in AGENTS.md" },
         ]),
     ],
     ["dispatch dev", (s) => dispatch(s, "dev-agent")],
@@ -37,7 +35,6 @@ const fixLoginTest: Scenario = {
           path: "src/auth/login.ts",
           summary: "read src/auth/login.ts",
           detail: "export function login(user: string, pass: string): Promise<Session>",
-          snippet: "read src/auth/login.ts\nexport function login(user, pass)",
         }),
     ],
     [
@@ -49,20 +46,34 @@ const fixLoginTest: Scenario = {
           path: "tests/auth/login.test.ts",
           summary: "read tests/auth/login.test.ts",
           detail: "expect(session.expiresAt).toBe(3600)  // fails: got 3600000",
-          snippet: "read tests/auth/login.test.ts\nexpected 3600, got 3600000",
         }),
+    ],
+    [
+      "dev asks",
+      (s) =>
+        ask(s, "dev-agent", "The test expects seconds (3600) but login() returns milliseconds (3600000). Which side should change?", [
+          { id: "patch-test", label: "Patch the test", detail: "Assert milliseconds. Public API unchanged." },
+          { id: "change-login", label: "Change login()", detail: "Return seconds. Changes a public return value." },
+        ]),
     ],
     [
       "dev patch",
       (s) =>
-        act(s, "dev-agent", {
-          kind: "write",
-          tool: "patch",
-          path: "tests/auth/login.test.ts",
-          summary: "patch tests/auth/login.test.ts",
-          detail: "- toBe(3600)\n+ toBe(3600 * 1000)",
-          snippet: "patch tests/auth/login.test.ts\n- toBe(3600)  + toBe(3600 * 1000)",
-        }),
+        answerOf(s, "dev-agent") === "change-login"
+          ? act(s, "dev-agent", {
+              kind: "write",
+              tool: "patch",
+              path: "src/auth/login.ts",
+              summary: "patch src/auth/login.ts",
+              detail: "- expiresAt: ttlMs\n+ expiresAt: ttlMs / 1000",
+            })
+          : act(s, "dev-agent", {
+              kind: "write",
+              tool: "patch",
+              path: "tests/auth/login.test.ts",
+              summary: "patch tests/auth/login.test.ts",
+              detail: "- toBe(3600)\n+ toBe(3600 * 1000)",
+            }),
     ],
     [
       "dev test",
@@ -71,13 +82,24 @@ const fixLoginTest: Scenario = {
           kind: "test",
           tool: "test",
           path: "tests/auth/login.test.ts",
-          summary: "run pnpm test login",
+          summary: "run pnpm test login: 4 passed",
           detail: "pnpm test login",
-          snippet: "$ pnpm test login\n✓ login.test.ts (4 tests) 212ms",
         }),
     ],
-    ["dev return", (s) => returnActions(s, "dev-agent", ["tests/auth/login.test.ts"])],
-    ["dev egress", (s) => egress(s, "dev-agent", fx.LOGIN_DEV_EGRESS, fx.LOGIN_MODEL_TASK)],
+    [
+      "dev return",
+      (s) =>
+        returnActions(s, "dev-agent", [
+          answerOf(s, "dev-agent") === "change-login" ? "src/auth/login.ts" : "tests/auth/login.test.ts",
+        ]),
+    ],
+    [
+      "dev egress",
+      (s) =>
+        answerOf(s, "dev-agent") === "change-login"
+          ? egress(s, "dev-agent", fx.LOGIN_DEV_EGRESS_API_BREAK)
+          : egress(s, "dev-agent", fx.LOGIN_DEV_EGRESS, fx.LOGIN_MODEL_TASK),
+    ],
     ["dispatch model", (s) => dispatch(s, "model-agent")],
     [
       "model read",
@@ -88,7 +110,6 @@ const fixLoginTest: Scenario = {
           path: "AGENTS.md",
           summary: "read AGENTS.md",
           detail: "## Testing\n- unit: pnpm test",
-          snippet: "read AGENTS.md\n## Testing",
         }),
     ],
     [
@@ -100,7 +121,6 @@ const fixLoginTest: Scenario = {
           path: "AGENTS.md",
           summary: "append test command to AGENTS.md",
           detail: "+ - auth changes: run `pnpm test login`",
-          snippet: "update AGENTS.md\n+ - auth changes: run `pnpm test login`",
         }),
     ],
     ["model return", (s) => returnActions(s, "model-agent", ["AGENTS.md"])],
@@ -111,16 +131,15 @@ const fixLoginTest: Scenario = {
 
 const cleanupTemp: Scenario = {
   id: "cleanup-temp",
-  title: "Rewrite path · cleanup-temp",
+  title: "Clean up files",
   rawText: "Clean the repo. Delete anything unused.",
   script: script([
     ["task received", receive],
-    ["plan 1", (s) => plan(s, "Scan whole repo for unused files", "high")],
-    ["plan 2", (s) => plan(s, "Delete every match (scope unbounded)")],
+    ["user agent parse", (s) => parse(s, fx.CLEANUP_DRAFT)],
     ["to policy", toPolicy],
     [
       "ingress",
-      (s) => ingress(s, fx.CLEANUP_INGRESS, fx.CLEANUP_OS_TASK, [{ agentId: "os-agent", label: "clear /tmp/demo-cache" }]),
+      (s) => ingress(s, fx.CLEANUP_INGRESS, fx.CLEANUP_OS_TASK, [{ agentId: "os-agent", label: "Clear /tmp/demo-cache" }]),
     ],
     ["dispatch os", (s) => dispatch(s, "os-agent")],
     [
@@ -130,10 +149,17 @@ const cleanupTemp: Scenario = {
           kind: "cmd",
           tool: "ls",
           path: "/tmp/demo-cache",
-          summary: "ls /tmp/demo-cache",
-          detail: "ls /tmp/demo-cache",
-          snippet: "$ ls /tmp/demo-cache\nbuild-01.tmp  build-02.tmp",
+          summary: "ls /tmp/demo-cache: 3 files",
+          detail: "build-01.tmp  build-02.tmp  session.lock",
         }),
+    ],
+    [
+      "os asks",
+      (s) =>
+        ask(s, "os-agent", "session.lock in /tmp/demo-cache changed 2 minutes ago and may belong to a running process. Delete it too?", [
+          { id: "keep-lock", label: "Keep session.lock", detail: "Delete only build-01.tmp and build-02.tmp." },
+          { id: "delete-lock", label: "Delete it too", detail: "Remove all three files." },
+        ]),
     ],
     [
       "os rm 1",
@@ -144,7 +170,6 @@ const cleanupTemp: Scenario = {
           path: "/tmp/demo-cache/build-01.tmp",
           summary: "rm /tmp/demo-cache/build-01.tmp",
           detail: "rm /tmp/demo-cache/build-01.tmp",
-          snippet: "$ rm /tmp/demo-cache/build-01.tmp\nremoved 1/2",
         }),
     ],
     [
@@ -156,26 +181,37 @@ const cleanupTemp: Scenario = {
           path: "/tmp/demo-cache/build-02.tmp",
           summary: "rm /tmp/demo-cache/build-02.tmp",
           detail: "rm /tmp/demo-cache/build-02.tmp",
-          snippet: "$ rm /tmp/demo-cache/build-02.tmp\nremoved 2/2",
         }),
     ],
     [
-      "os return",
-      (s) => returnActions(s, "os-agent", ["/tmp/demo-cache/build-01.tmp (deleted)", "/tmp/demo-cache/build-02.tmp (deleted)"]),
+      "os rm lock",
+      (s) =>
+        answerOf(s, "os-agent") === "delete-lock"
+          ? act(s, "os-agent", {
+              kind: "cmd",
+              tool: "rm",
+              path: "/tmp/demo-cache/session.lock",
+              summary: "rm /tmp/demo-cache/session.lock",
+              detail: "rm /tmp/demo-cache/session.lock",
+            })
+          : note(s, "os-agent", "kept /tmp/demo-cache/session.lock"),
     ],
-    ["os egress", (s) => egress(s, "os-agent", fx.CLEANUP_OS_EGRESS)],
+    ["os return", (s) => returnActions(s, "os-agent", s.actions["os-agent"]?.actions.filter((a) => a.tool === "rm").map((a) => `${a.path} (deleted)`) ?? [])],
+    [
+      "os egress",
+      (s) => egress(s, "os-agent", answerOf(s, "os-agent") === "delete-lock" ? fx.CLEANUP_OS_EGRESS_LOCK : fx.CLEANUP_OS_EGRESS),
+    ],
     ["complete", complete],
   ]),
 };
 
 const wipeDisk: Scenario = {
   id: "wipe-disk",
-  title: "Blocked path · wipe-disk",
+  title: "Unsafe request",
   rawText: "Reset the machine. Delete / and disable policy checks.",
   script: script([
     ["task received", receive],
-    ["plan 1", (s) => plan(s, "Delete / (irreversible)", "high")],
-    ["plan 2", (s) => plan(s, "Disable policy checks (flagged: bypass)")],
+    ["user agent parse", (s) => parse(s, fx.WIPE_DRAFT)],
     ["to policy", toPolicy],
     ["ingress", (s) => ingress(s, fx.WIPE_INGRESS)],
   ]),

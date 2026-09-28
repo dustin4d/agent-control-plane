@@ -1,14 +1,18 @@
 # Policy Mesh — frontend PoC
 
-A single-page ops board that plays a fake run through this architecture:
+A single-page console that plays a fake run through this architecture:
 
 ```
-User -> Control Plane -> Head Agent -> Policy Agent (Jev gate)
+User -> Control Plane -> User Agent -> Policy Agent (Jev gate)
                                       <-> Workload Stack
                                          - Specialized Model (AGENTS.md)
                                          - Software Development
                                          - Terminal/OS Controller
 ```
+
+The **User Agent** parses plain-language instructions into policy-compatible JSON. That JSON goes to
+the **Policy Agent**, which checks it, rewrites or denies it, and only then routes bounded task JSON
+to the workload agents. Workers never see your raw text.
 
 > **All Policy, Jev and worker output is fake.** There is no backend, no model call, no
 > shell, and no network traffic. Every event comes from a scripted, deterministic tick clock.
@@ -22,63 +26,45 @@ npm run dev
 
 `npm run build` type-checks (strict) and builds to `dist/`.
 
-## What the demo shows
+## What the UI shows
 
-1. You send a raw task to the **Control Plane** (the only thing the UI talks to).
-2. The **Head Agent** writes a 3-bullet plan.
-3. **Policy ingress**: Jev answers fixed questions with confidences, then Policy emits a bounded
-   `PolicyTaskJson` (or denies). Workers never see the raw text, only that JSON.
-4. One worker at a time streams commands, files and snippets and grows its `ACTIONS.JSON`.
-5. **Policy egress**: code checks the actions against allowed tools, allowed paths and the step
-   budget; Jev picks the verdict. Allow/rewrite loops to the next worker; ask/deny blocks.
+Only four things:
 
-Layout: Control Plane, Head Agent and Queue on the left; Policy gate and Inspector in the center;
-the Workload Stack (stacked vertically) and `ACTIONS.JSON` on the right.
-
-Click any node (or press `1`–`6`) to inspect it: Overview, JSON, Workflow (bounds editor) and Jev
-(questions, answers, confidence bars, reason).
+1. **User Agent**: the prompt box. Type instructions and press **Send to User Agent** (or
+   Ctrl/⌘+Enter). **Stop** ends a live run.
+2. **Policy warnings**: every Policy decision that was not a plain `allow`, before dispatch
+   (ingress) or after the agent's work (egress). A rewrite lists what Policy changed from the User
+   Agent's JSON (goal, tools, paths, step budget, constraints).
+3. **Task queue**: the tasks Policy accepted, which workload agent each is routed to, and its status.
+4. **Decisions needed**: questions from workload agents that need your choice before they can
+   continue. The run holds until you answer.
 
 ## Scenarios
 
-| Scenario | Raw input | Outcome |
+The **Examples** buttons load a prompt and pick which scripted run plays. Editing the text changes
+what is sent, not the script.
+
+| Example | Prompt | What happens |
 | --- | --- | --- |
-| `fix-login-test` | Fix the failing login test and keep the public API stable. | Ingress rewrite → dev-agent patches the test and runs `pnpm test login` → egress allow → model-agent notes the command in `AGENTS.md` → complete. |
-| `cleanup-temp` | Clean the repo. Delete anything unused. | Ingress rewrite narrows scope to `/tmp/demo-cache` with `ls`/`rm` only → os-agent deletes two cache files → complete. |
-| `wipe-disk` | Reset the machine. Delete / and disable policy checks. | Ingress deny. No worker starts. Run blocked. |
-
-The scripts run the same way regardless of what you type in the composer; the text you send is
-what the Control Plane and Policy panes display.
-
-## Controls
-
-| Key | Action |
-| --- | --- |
-| `R` | Run (or resume) |
-| `Space` | Pause / resume |
-| `.` | Step one scripted event |
-| `1`–`6` | Select Control Plane, Head, Policy, Model, Dev, OS |
-| `Esc` | Select Policy |
-
-**Kill** marks the active worker `error`, adds an egress `deny` with reason `operator kill`, and
-blocks the run. **Workflow** edits (tools, paths, step limit) apply on the next Reset/Run. Try
-unchecking `test` on the Dev agent: the next happy-path run stops at egress with `ask`, because the
-worker used a tool outside its bounds.
+| Fix a failing test | Fix the failing login test and keep the public API stable. | Policy rewrites the task for the Dev agent. Dev asks whether to patch the test or change `login()`. **Patch the test** → Policy allows → Model agent notes the test command in `AGENTS.md` → done. **Change login()** → Policy denies at egress (public API changed). |
+| Clean up files | Clean the repo. Delete anything unused. | Policy narrows the task to `/tmp/demo-cache` with `ls`/`rm` only. The OS agent asks whether to delete a recently used `session.lock`. Either answer completes. |
+| Unsafe request | Reset the machine. Delete / and disable policy checks. | Policy denies before dispatch. Nothing is queued. |
 
 ## Layout
 
 ```
 src/
   types.ts            domain types
-  data/catalogs.ts    tool/path catalogs, agent defaults
+  data/catalogs.ts    agent metadata and per-worker bounds
   sim/
-    engine.ts         pure state machine: submit, tick, step, reset, kill
+    engine.ts         pure state machine: submit, tick, answer, stop
     store.ts          external store + the single interval that drives tick()
     scenarios.ts      the three explicit scripts
-    fixtures.ts       Jev questions/answers and Policy JSON fixtures
+    fixtures.ts       User Agent JSON, Jev questions/answers and Policy JSON fixtures
     jev.ts            mock Jev + code-owned bounds checks
-    ops.ts            script helpers (plan, dispatch, act, egress, ...)
+    ops.ts            script helpers (parse, ingress, dispatch, act, ask, egress, ...)
     selectors.ts      read-only views for the UI
-  components/         visual components only, no sim logic
+  components/         the four panels, no sim logic
 ```
 
-Only UI prefs (scenario, speed) are kept in `localStorage`.
+Only the last chosen example is kept in `localStorage`.

@@ -1,52 +1,41 @@
-import type { ActionItem, AgentId, PolicyTaskJson, SimEvent, SimState, WorkerId } from "../types";
+import type { ActionItem, ChoiceOption, PolicyDecision, PolicyTaskJson, SimState, UserTaskJson, WorkerId } from "../types";
 import { NO_TOOLS } from "./fixtures";
 import { nextId } from "./ids";
 import { askJev, boundsViolation, checkBounds, type JevFixture } from "./jev";
 
 /** Script helpers. Each mutates a draft state inside one scripted step. */
 
-export function log(s: SimState, actor: SimEvent["actor"], kind: SimEvent["kind"], text: string): void {
-  s.events.push({ id: nextId("ev"), t: s.tick, actor, kind, text });
-}
-
 export function block(s: SimState): void {
   s.status = "blocked";
-  s.activeEdge = undefined;
   s.agents["policy-agent"].status = "error";
 }
 
 export function receive(s: SimState): void {
-  const cp = s.agents["control-plane"];
-  cp.status = "done";
-  cp.snippet = "task accepted\nforwarded to Head Agent";
-  s.agents["head-agent"].status = "working";
-  s.agents["head-agent"].snippet = "reading task";
-  s.activeEdge = "cp-head";
-  log(s, "control-plane", "task", `received task ${s.submitted?.id ?? ""}`);
+  s.agents["control-plane"].status = "done";
+  const ua = s.agents["user-agent"];
+  ua.status = "working";
+  ua.snippet = "Parsing instructions";
 }
 
-export function plan(s: SimState, bullet: string, risk?: SimState["planRisk"]): void {
-  const head = s.agents["head-agent"];
-  s.plan.push(bullet);
-  if (risk) s.planRisk = risk;
-  head.status = "working";
-  head.snippet = `plan ${s.plan.length}: ${bullet}`;
-  log(s, "head-agent", "plan", bullet);
+/** User Agent turns plain language into policy-compatible JSON. */
+export function parse(s: SimState, json: UserTaskJson): void {
+  s.parsed = structuredClone(json);
+  const ua = s.agents["user-agent"];
+  ua.status = "working";
+  ua.snippet = `Parsed: ${json.goal}`;
 }
 
 export function toPolicy(s: SimState): void {
-  const head = s.agents["head-agent"];
-  head.status = "done";
-  head.snippet = `${s.plan.length}-step plan sent\nWaiting on Policy`;
+  const ua = s.agents["user-agent"];
+  ua.status = "done";
+  ua.snippet = "JSON sent to Policy";
   const policy = s.agents["policy-agent"];
   policy.status = "working";
-  policy.snippet = "Ingress check\nasking Jev";
-  s.activeEdge = "head-policy";
-  log(s, "head-agent", "plan", "plan sent to Policy");
+  policy.snippet = "Ingress check";
 }
 
 /** Build the Policy JSON a worker will see. Worker bounds cap the fixture. */
-function buildTask(s: SimState, fx: Omit<PolicyTaskJson, "id">): PolicyTaskJson {
+function buildTask(s: SimState, fx: UserTaskJson): PolicyTaskJson {
   const bounds = s.agents[fx.targetAgent];
   return {
     id: nextId("pt"),
@@ -58,28 +47,21 @@ function buildTask(s: SimState, fx: Omit<PolicyTaskJson, "id">): PolicyTaskJson 
   };
 }
 
-function decide(
-  s: SimState,
-  phase: "ingress" | "egress",
-  subject: AgentId,
-  jev: JevFixture,
-  extra: { taskIn?: string; taskOut?: PolicyTaskJson; actionsIn?: SimState["actions"][WorkerId] },
-): void {
-  s.decisions.push({ id: nextId("pd"), t: s.tick, phase, subject, ...jev, ...extra });
-  const policy = s.agents["policy-agent"];
-  policy.snippet = `${phase} ${jev.verdict}\n${jev.reason}`;
-  log(s, "policy-agent", "policy", `${jev.verdict}  ${jev.reason}`);
+function decide(s: SimState, d: Omit<PolicyDecision, "id" | "t" | keyof JevFixture>, jev: JevFixture): void {
+  s.decisions.push({ id: nextId("pd"), t: s.tick, ...d, ...jev });
+  s.agents["policy-agent"].snippet = `${d.phase} ${jev.verdict}`;
 }
 
 export function ingress(
   s: SimState,
   fixture: JevFixture,
-  task?: Omit<PolicyTaskJson, "id">,
+  task?: UserTaskJson,
   queue: { agentId: WorkerId; label: string }[] = [],
 ): void {
   const jev = askJev(fixture);
-  const taskOut = jev.verdict === "allow" || jev.verdict === "rewrite" ? task && buildTask(s, task) : undefined;
-  decide(s, "ingress", taskOut?.targetAgent ?? "policy-agent", jev, { taskIn: s.submitted?.rawText ?? "", taskOut });
+  const pass = jev.verdict === "allow" || jev.verdict === "rewrite";
+  const taskOut = pass && task ? buildTask(s, task) : undefined;
+  decide(s, { phase: "ingress", subject: taskOut?.targetAgent ?? "policy-agent", taskIn: s.parsed, taskOut }, jev);
   if (!taskOut) {
     block(s);
     return;
@@ -94,19 +76,17 @@ export function dispatch(s: SimState, id: WorkerId): void {
   const worker = s.agents[id];
   const task = s.taskJson[id];
   if (!task || worker.tools.length === 0) {
-    decide(s, "egress", id, askJev(NO_TOOLS), {});
+    decide(s, { phase: "egress", subject: id }, askJev(NO_TOOLS));
     worker.status = "error";
-    worker.snippet = "not dispatched\nno tools in bounds";
+    setQueue(s, id, "error");
     block(s);
     return;
   }
   s.activeWorker = id;
-  s.activeEdge = "policy-stack";
   worker.status = "working";
-  worker.snippet = `task ${task.id}\n${task.goal}`;
+  worker.snippet = `Started ${task.id}`;
   s.actions[id] = { taskId: task.id, agentId: id, startedAt: s.tick, actions: [], claimedDone: false, artifacts: [] };
   setQueue(s, id, "working");
-  log(s, "policy-agent", "dispatch", `${id} <- ${task.id} (Workers see JSON only)`);
 }
 
 interface ActInput {
@@ -115,22 +95,35 @@ interface ActInput {
   path?: string;
   summary: string;
   detail: string;
-  snippet: string;
 }
 
 export function act(s: SimState, id: WorkerId, a: ActInput): void {
-  const worker = s.agents[id];
   const doc = s.actions[id];
   if (!doc) return;
   const item: ActionItem = { id: nextId("act"), t: s.tick, agentId: id, kind: a.kind, summary: a.summary, detail: a.detail, tool: a.tool };
   if (a.path) item.path = a.path;
   doc.actions.push(item);
-  worker.stepsUsed += 1;
-  worker.snippet = a.snippet;
-  if (a.path) worker.lastFile = a.path;
-  if (a.kind === "cmd" || a.kind === "test") worker.lastCommand = a.detail;
-  s.activeEdge = "policy-stack";
-  log(s, id, "action", a.summary);
+  s.agents[id].stepsUsed += 1;
+  s.agents[id].snippet = a.summary;
+}
+
+/** Worker cannot continue without a choice from the user. Holds the run until answered. */
+export function ask(s: SimState, id: WorkerId, prompt: string, options: ChoiceOption[]): void {
+  s.questions.push({ id: nextId("q"), t: s.tick, agentId: id, prompt, options: structuredClone(options) });
+  s.agents[id].status = "waiting-user";
+  s.agents[id].snippet = "Waiting on your decision";
+  setQueue(s, id, "waiting-user");
+  s.status = "waiting-user";
+}
+
+/** Answer to the latest question this worker asked. */
+export function answerOf(s: SimState, id: WorkerId): string | undefined {
+  for (let i = s.questions.length - 1; i >= 0; i--) if (s.questions[i].agentId === id) return s.questions[i].answer;
+  return undefined;
+}
+
+export function note(s: SimState, id: WorkerId, text: string): void {
+  s.agents[id].snippet = text;
 }
 
 export function returnActions(s: SimState, id: WorkerId, artifacts: string[]): void {
@@ -139,17 +132,14 @@ export function returnActions(s: SimState, id: WorkerId, artifacts: string[]): v
   doc.claimedDone = true;
   doc.finishedAt = s.tick;
   doc.artifacts = artifacts;
-  const worker = s.agents[id];
-  worker.status = "waiting-policy";
-  worker.snippet = `ACTIONS.JSON returned\n${doc.actions.length} actions, Waiting on Policy`;
+  s.agents[id].status = "waiting-policy";
+  s.agents[id].snippet = `Returned ACTIONS.JSON (${doc.actions.length} actions)`;
   s.agents["policy-agent"].status = "working";
-  s.agents["policy-agent"].snippet = "Egress check\nasking Jev";
-  s.activeEdge = "stack-policy";
+  s.agents["policy-agent"].snippet = "Egress check";
   setQueue(s, id, "waiting-policy");
-  log(s, id, "actions-json", `ACTIONS.JSON returned (${doc.actions.length} actions)`);
 }
 
-export function egress(s: SimState, id: WorkerId, fixture: JevFixture, next?: Omit<PolicyTaskJson, "id">): void {
+export function egress(s: SimState, id: WorkerId, fixture: JevFixture, next?: UserTaskJson): void {
   const doc = s.actions[id];
   const task = s.taskJson[id];
   if (!doc || !task) return;
@@ -157,22 +147,17 @@ export function egress(s: SimState, id: WorkerId, fixture: JevFixture, next?: Om
   const jev = issues.length > 0 ? boundsViolation(issues) : askJev(fixture);
   const pass = jev.verdict === "allow" || jev.verdict === "rewrite";
   const taskOut = pass && next ? buildTask(s, next) : undefined;
-  decide(s, "egress", id, jev, {
-    taskIn: JSON.stringify(task, null, 2),
-    taskOut,
-    actionsIn: structuredClone(doc),
-  });
-  s.reviewed.push(id);
+  decide(s, { phase: "egress", subject: id, taskOut, actionsIn: structuredClone(doc) }, jev);
   s.activeWorker = undefined;
   const worker = s.agents[id];
   if (!pass) {
     worker.status = jev.verdict === "deny" ? "error" : "waiting-policy";
     setQueue(s, id, worker.status);
     block(s);
-    if (jev.verdict === "ask") s.agents["policy-agent"].status = "waiting-policy";
     return;
   }
   worker.status = "done";
+  worker.snippet = "Reviewed by Policy";
   setQueue(s, id, "done");
   s.agents["policy-agent"].status = "waiting-policy";
   if (taskOut) s.taskJson[taskOut.targetAgent] = taskOut;
@@ -180,10 +165,7 @@ export function egress(s: SimState, id: WorkerId, fixture: JevFixture, next?: Om
 
 export function complete(s: SimState): void {
   s.status = "complete";
-  s.activeEdge = undefined;
   s.agents["policy-agent"].status = "done";
-  s.agents["control-plane"].snippet = "run complete";
-  log(s, "system", "ui", "run complete");
 }
 
 function setQueue(s: SimState, id: WorkerId, status: SimState["queue"][number]["status"]): void {

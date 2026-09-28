@@ -1,59 +1,39 @@
-import { isWorker } from "../data/catalogs";
-import type { AgentId, PolicyDecision, SimEvent, SimState } from "../types";
+import type { PolicyDecision, SimState } from "../types";
 
 /** Read-only views for the UI. No mutation here. */
 
-export type Health = "GATE READY" | "GATE OPEN" | "REVIEW" | "BLOCKED";
-
-export function latestDecision(s: SimState, phase?: PolicyDecision["phase"]): PolicyDecision | undefined {
-  for (let i = s.decisions.length - 1; i >= 0; i--) {
-    const d = s.decisions[i];
-    if (!phase || d.phase === phase) return d;
-  }
-  return undefined;
+export interface PolicyWarning {
+  decision: PolicyDecision;
+  /** What Policy changed between the User Agent JSON and the JSON it sent on. */
+  changes: string[];
 }
 
-export function policyHealth(s: SimState): Health {
-  const last = latestDecision(s);
-  if (!last) return s.status === "blocked" ? "BLOCKED" : "GATE READY";
-  if (last.verdict === "deny") return "BLOCKED";
-  if (last.verdict === "ask") return "REVIEW";
-  return "GATE OPEN";
+const list = (xs: string[]) => (xs.length ? xs.join(", ") : "none");
+
+function diff(d: PolicyDecision): string[] {
+  const a = d.taskIn;
+  const b = d.taskOut;
+  if (!a || !b) return [];
+  const out: string[] = [];
+  if (a.goal !== b.goal) out.push(`goal → ${b.goal}`);
+  const droppedTools = a.allowedTools.filter((t) => !b.allowedTools.includes(t));
+  if (droppedTools.length) out.push(`tools removed: ${list(droppedTools)}`);
+  if (list(a.allowedPaths) !== list(b.allowedPaths)) out.push(`paths ${list(a.allowedPaths)} → ${list(b.allowedPaths)}`);
+  if (a.stepBudget !== b.stepBudget) out.push(`step budget ${a.stepBudget} → ${b.stepBudget}`);
+  const added = b.constraints.filter((c) => !a.constraints.includes(c));
+  for (const c of added) out.push(`constraint added: ${c}`);
+  if (a.targetAgent !== b.targetAgent) out.push(`routed to ${b.targetAgent}`);
+  return out;
 }
 
-/** Latest decision that touched a node. Policy and Control Plane see all. */
-export function decisionFor(s: SimState, id: AgentId): PolicyDecision | undefined {
-  if (!isWorker(id)) return latestDecision(s);
-  for (let i = s.decisions.length - 1; i >= 0; i--) {
-    const d = s.decisions[i];
-    if (d.subject === id || d.taskOut?.targetAgent === id) return d;
-  }
-  return undefined;
+/** Every Policy decision that was not a plain allow. */
+export function policyWarnings(s: SimState): PolicyWarning[] {
+  return s.decisions.filter((d) => d.verdict !== "allow").map((decision) => ({ decision, changes: diff(decision) }));
 }
 
-export function eventsFor(s: SimState, id: AgentId, limit = 8): SimEvent[] {
-  const matches = s.events.filter((e) => {
-    if (e.actor === id) return true;
-    if (id === "policy-agent") return e.kind === "policy" || e.kind === "dispatch";
-    return isWorker(id) && e.kind === "dispatch" && e.text.startsWith(id);
-  });
-  return matches.slice(-limit);
-}
-
-export function lastConfidence(d: PolicyDecision | undefined): number | undefined {
-  if (!d || d.results.length === 0) return undefined;
-  return Math.min(...d.results.map((r) => r.confidence));
-}
-
-export function runSummary(s: SimState): { workers: number; denials: number } {
+export function runSummary(s: SimState): { workers: number; decisions: number } {
   return {
-    workers: new Set(s.queue.filter((q) => q.status === "done").map((q) => q.agentId)).size,
-    denials: s.decisions.filter((d) => d.verdict === "deny").length,
+    workers: s.queue.filter((q) => q.status === "done").length,
+    decisions: s.questions.filter((q) => q.answer).length,
   };
 }
-
-export const fmtTime = (tick: number): string => {
-  const m = Math.floor(tick / 60).toString().padStart(2, "0");
-  const sec = (tick % 60).toString().padStart(2, "0");
-  return `t+${m}:${sec}`;
-};

@@ -14,7 +14,7 @@ export default {
         model: "#F59E0B",
         dev: "#3B82F6",
         os: "#22C55E",
-        head: "#8B5CF6",
+        user: "#8B5CF6",
         allow: "#22C55E",
         ask: "#F5B942",
         deny: "#EF4444",

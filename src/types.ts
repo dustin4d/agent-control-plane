@@ -1,16 +1,16 @@
 export type AgentId =
   | "control-plane"
-  | "head-agent"
+  | "user-agent"
   | "policy-agent"
   | "model-agent"
   | "dev-agent"
   | "os-agent";
 
-export type WorkerId = Exclude<AgentId, "control-plane" | "head-agent" | "policy-agent">;
+export type WorkerId = Exclude<AgentId, "control-plane" | "user-agent" | "policy-agent">;
 
 export type Verdict = "allow" | "rewrite" | "ask" | "deny";
-export type RunStatus = "idle" | "running" | "paused" | "complete" | "blocked";
-export type AgentStatus = "idle" | "queued" | "working" | "waiting-policy" | "done" | "error";
+export type RunStatus = "idle" | "running" | "waiting-user" | "complete" | "blocked";
+export type AgentStatus = "idle" | "queued" | "working" | "waiting-policy" | "waiting-user" | "done" | "error";
 
 export interface TaskInput {
   id: string;
@@ -28,6 +28,9 @@ export interface PolicyTaskJson {
   targetAgent: WorkerId;
   risk: "low" | "medium" | "high";
 }
+
+/** What the User Agent parses plain language into. Policy checks it before any worker sees work. */
+export type UserTaskJson = Omit<PolicyTaskJson, "id">;
 
 export interface JevQuestion {
   id: string;
@@ -51,7 +54,8 @@ export interface PolicyDecision {
   questions: JevQuestion[];
   results: JevResult[];
   subject: AgentId;
-  taskIn?: string;
+  /** User Agent JSON, on ingress. */
+  taskIn?: UserTaskJson;
   taskOut?: PolicyTaskJson;
   actionsIn?: ActionsJson;
 }
@@ -86,8 +90,6 @@ export interface AgentState {
   color: string;
   status: AgentStatus;
   snippet: string;
-  lastFile?: string;
-  lastCommand?: string;
   tools: string[];
   paths: string[];
   stepLimit: number;
@@ -100,17 +102,23 @@ export interface WorkflowEdit {
   stepLimit: number;
 }
 
-export interface SimEvent {
+export interface ChoiceOption {
+  id: string;
+  label: string;
+  detail: string;
+}
+
+/** A choice a workload agent needs from the user before it can continue. */
+export interface WorkerQuestion {
   id: string;
   t: number;
-  actor: AgentId | "system";
-  kind: "task" | "plan" | "policy" | "dispatch" | "action" | "actions-json" | "ui";
-  text: string;
+  agentId: WorkerId;
+  prompt: string;
+  options: ChoiceOption[];
+  answer?: string;
 }
 
 export type ScenarioId = "fix-login-test" | "cleanup-temp" | "wipe-disk";
-
-export type EdgeId = "cp-head" | "head-policy" | "policy-stack" | "stack-policy";
 
 export interface QueueItem {
   agentId: WorkerId;
@@ -125,20 +133,17 @@ export interface SimState {
   cursor: number;
   status: RunStatus;
   submitted?: TaskInput;
-  inputHistory: TaskInput[];
-  plan: string[];
-  planRisk?: "low" | "medium" | "high";
+  /** User Agent output, once parsed. */
+  parsed?: UserTaskJson;
   agents: Record<AgentId, AgentState>;
   decisions: PolicyDecision[];
   /** Policy JSON each worker has been handed in this run. */
   taskJson: Partial<Record<WorkerId, PolicyTaskJson>>;
   /** Latest ACTIONS.JSON per worker. */
   actions: Partial<Record<WorkerId, ActionsJson>>;
-  reviewed: WorkerId[];
   activeWorker?: WorkerId;
   queue: QueueItem[];
-  activeEdge?: EdgeId;
-  events: SimEvent[];
+  questions: WorkerQuestion[];
 }
 
 export interface ScriptStep {

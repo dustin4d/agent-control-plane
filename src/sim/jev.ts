@@ -4,9 +4,6 @@ import type { ActionsJson, JevQuestion, JevResult, PolicyTaskJson, Verdict } fro
  * Mock Jev. Never calls a model: each decision comes from a fixture.
  * Code owns the option list and the hard bounds checks below.
  */
-export const JEV_HELP =
-  "Jev does not write tasks. Code owns the option list. Jev picks allow, rewrite, ask, or deny. Hard denies stay in code.";
-
 export const VERDICT_OPTIONS: Verdict[] = ["allow", "rewrite", "ask", "deny"];
 
 export interface JevFixture {
